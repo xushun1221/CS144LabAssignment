@@ -11,15 +11,13 @@
 //! possibly overlapping) into an in-order byte stream.
 class StreamReassembler {
   private:
-    std::map<uint64_t, std::string> _substrings{};
-    uint64_t _index_of_stream{0};
+    std::map<size_t, std::string> _unassembled_strings{};
+    size_t _next_assemble_index{0};
     size_t _unassembled_bytes{0};
-    bool _eof{false};
+    size_t _eof_index{SIZE_MAX};
     
     ByteStream _output{0};  //!< The reassembled in-order byte stream
     size_t _capacity{0};    //!< The maximum number of bytes
-  public:
-    int merge_substring(uint64_t l_index, std::string& l_sub, uint64_t r_index, std::string& r_sub);
   public:
     //! \brief Construct a `StreamReassembler` that will store up to `capacity` bytes.
     //! \note This capacity limits both the bytes that have been reassembled,
