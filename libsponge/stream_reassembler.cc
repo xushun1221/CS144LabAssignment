@@ -1,105 +1,56 @@
 #include "stream_reassembler.hh"
 
-#include <cassert>
-
-// Dummy implementation of a stream reassembler.
-
-// For Lab 1, please replace with a real implementation that passes the
-// automated checks run by `make check_lab1`.
-
-// You will need to add private members to the class declaration in `stream_reassembler.hh`
-
-template <typename... Targs>
-void DUMMY_CODE(Targs &&.../* unused */) {}
-
 using namespace std;
 
-StreamReassembler::StreamReassembler(const size_t capacity): _output(capacity), _capacity(capacity) {}
+StreamReassembler::StreamReassembler(const size_t capacity)
+    : _unassembled_chars(capacity, '\0'), // 初始化为空字符
+    _unassembled_flags(capacity, false),  // 初始化为false
+    _output(capacity), 
+    _capacity(capacity) {}
 
-//! \details This function accepts a substring (aka a segment) of bytes,
-//! possibly out-of-order, from the logical stream, and assembles any newly
-//! contiguous substrings and writes them into the output stream in order.
 void StreamReassembler::push_substring(const string &data, const size_t index, const bool eof) {
-
-    auto pos_iter = _unassembled_strings.upper_bound(index);
-    if (pos_iter != _unassembled_strings.begin())
-        -- pos_iter;
-
-    size_t new_idx = index;
-    if (pos_iter != _unassembled_strings.end() && pos_iter -> first <= index) {
-        const size_t up_idx = pos_iter -> first;
-        if (index < up_idx + pos_iter -> second.size())
-            new_idx = up_idx + pos_iter -> second.size();
-    }
-    else if (index < _next_assemble_index)
-        new_idx = _next_assemble_index;
-
-
-    const size_t data_start_pos = new_idx - index;
-    ssize_t data_size = data.size() - data_start_pos;
-
-    pos_iter = _unassembled_strings.lower_bound(new_idx);
-
-    while (pos_iter != _unassembled_strings.end() && new_idx <= pos_iter -> first) {
-        const size_t data_end_pos = new_idx + data_size;
-        if (data_end_pos > pos_iter -> first) {
-            if (data_end_pos < pos_iter->first + pos_iter->second.size()) {
-                data_size = pos_iter->first - new_idx;
-                break;
-            }
-            else {
-                _unassembled_bytes -= pos_iter->second.size();
-                pos_iter = _unassembled_strings.erase(pos_iter);
-                continue;
-            }
-        }
-        else
-            break;
-    }
-
-    size_t first_unacceptable_idx = _next_assemble_index + _output.remaining_capacity();
-    if (first_unacceptable_idx <= new_idx)
+    // 我们在_unassembled_chars中可以容纳的字节数，不能多于ByteStream中剩余缓冲区的容量
+    // 如果当前串的起始位置，超过容纳范围，直接丢弃该串
+    if (index >= _next_assemble_index + _output.remaining_capacity())
         return;
-
-    if (data_size > 0) {
-        const string new_data = data.substr(data_start_pos, data_size);
-        if (new_idx == _next_assemble_index) {
-            const size_t write_byte = _output.write(new_data);
-            _next_assemble_index += write_byte;
-            if (write_byte < new_data.size()) {
-                const string data_to_store = new_data.substr(write_byte, new_data.size() - write_byte);
-                _unassembled_bytes += data_to_store.size();
-                _unassembled_strings[_next_assemble_index] = data_to_store;
+    // 如果当前串所有字节，都已经被写入ByteStream，则丢弃该串
+    if (index + data.size() <= _next_assemble_index) {
+        if (eof && empty()) // 如果eof标记为true，表明后续已无字节需要写入，关闭ByteStream输入
+            _output.end_input();
+        return;
+    }
+    // 只有当前串的最后一个字节落在_unassembled_chars的范围内，且eof==true时，才将_eof_flag置为true
+    // 标记当前串的最后一个字节是否在_unassembled_chars的范围内
+    bool flag_in_bounds = true;
+    if (index + data.size() > _next_assemble_index + _output.remaining_capacity())
+        flag_in_bounds = false;
+    // 遍历当前串，对在_unassembled_chars范围内的字节进行判断
+    for (size_t i = index; i < index + data.size() && i < _next_assemble_index + _output.remaining_capacity(); ++ i) {
+        if (i >= _next_assemble_index) {
+            if (_unassembled_flags[i - _next_assemble_index] == false) { // 如果该位置为空，则写入字节
+                _unassembled_chars[i - _next_assemble_index] = data[i - index];
+                _unassembled_flags[i - _next_assemble_index] = true;
+                ++ _unassembled_bytes;
             }
-        } else {
-            const string data_to_store = new_data;
-            _unassembled_bytes += data_to_store.size();
-            _unassembled_strings[new_idx] = data_to_store;
         }
     }
-
-    for (auto iter = _unassembled_strings.begin(); iter != _unassembled_strings.end(); ) {
-        assert(_next_assemble_index <= iter->first);
-        if (iter->first == _next_assemble_index) {
-            const size_t write_num = _output.write(iter->second);
-            _next_assemble_index += write_num;
-            if (write_num < iter->second.size()) {
-                _unassembled_bytes -= write_num;
-                _unassembled_strings[_next_assemble_index] = iter->second.substr(write_num, iter->second.size() - write_num);
-
-                //_unassembled_bytes -= iter->second.size();
-                _unassembled_strings.erase(iter);
-                break;
-            }
-            _unassembled_bytes -= iter->second.size();
-            iter = _unassembled_strings.erase(iter);
-        }
-        else
-            break;
+    // 把_unassembled_chars中开头的字节写入ByteStream
+    // 因为整个_unassembled_chars的大小不大于ByteStream缓冲区的剩余容量，所以不用担心写入的字节被丢弃
+    string write_string{};
+    for (size_t i = _next_assemble_index; _unassembled_flags[i - _next_assemble_index] == true; ++ i) {
+        write_string += _unassembled_chars[i - _next_assemble_index];
+        _unassembled_chars.pop_front();
+        _unassembled_chars.push_back('\0');
+        _unassembled_flags.pop_front();
+        _unassembled_flags.push_back(false);
+        ++ _next_assemble_index;
+        -- _unassembled_bytes;
     }
-    if (eof)
-        _eof_index = index + data.size();
-    if (_eof_index <= _next_assemble_index)
+    _output.write(write_string);
+    // 判断是否需要置位_eof_flag以及是否需要关闭ByteStream输入
+    if (flag_in_bounds && eof)
+        _eof_flag = true;
+    if (_eof_flag && empty())
         _output.end_input();
 }
 
