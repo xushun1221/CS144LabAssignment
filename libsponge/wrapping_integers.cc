@@ -14,8 +14,8 @@ using namespace std;
 //! \param n The input absolute 64-bit sequence number
 //! \param isn The initial sequence number
 WrappingInt32 wrap(uint64_t n, WrappingInt32 isn) {
-    DUMMY_CODE(n, isn);
-    return WrappingInt32{0};
+    // seqno = isn + n % 2^32
+    return WrappingInt32{isn + static_cast<uint32_t>(n)};
 }
 
 //! Transform a WrappingInt32 into an "absolute" 64-bit sequence number (zero-indexed)
@@ -29,6 +29,23 @@ WrappingInt32 wrap(uint64_t n, WrappingInt32 isn) {
 //! and the other stream runs from the remote TCPSender to the local TCPReceiver and
 //! has a different ISN.
 uint64_t unwrap(WrappingInt32 n, WrappingInt32 isn, uint64_t checkpoint) {
-    DUMMY_CODE(n, isn, checkpoint);
-    return {};
+    uint64_t offset = n.raw_value() - isn.raw_value();
+    // checkpoint = A * 2^32 + B
+    uint64_t A = checkpoint >> 32;
+    // num1 = (A - 1) * 2^32 + offset
+    uint64_t num1 = ((A - 1) << 32) + offset;
+    uint64_t abs1 = checkpoint - num1;
+    // num2 = A * 2^32 + offset
+    uint64_t num2 = (A << 32) + offset;
+    uint64_t abs2 = checkpoint > num2 ? checkpoint - num2 : num2 - checkpoint;
+    // num3 = (A + 1) * 2^32 + offset
+    uint64_t num3 = ((A + 1) << 32) + offset;
+    uint64_t abs3 = num3 - checkpoint;
+    // A == 0 只需比较abs2 abs3
+    if (A == 0)
+        return abs2 < abs3 ? num2 : num3;
+    // 比较abs1 abs2 abs3
+    if (abs1 < abs2)
+        return abs1 < abs3 ? num1 : num3;
+    return abs2 < abs3 ? num2 : num3;
 }
