@@ -32,6 +32,23 @@ class TCPSender {
     //! the (absolute) sequence number for the next byte to be sent
     uint64_t _next_seqno{0};
 
+    // syn fin 标记
+    bool _syn_flag{false};
+    bool _fin_flag{false};
+    // 重传缓存队列
+    std::queue<TCPSegment> _retransmission_buffer{};
+    // 重传队列总占用
+    size_t _retrans_buffer_space{0};
+    // 接收方窗口大小
+    size_t _window_size{1};
+    // 定时器
+    struct retransmission_timer {
+      size_t passage{0};   // 距离上次tick的时间
+      size_t retransmission_timeout;          // 当前RTO
+      size_t consecutive_retransmissions{0};  // 连续重传次数
+      retransmission_timer(size_t retrans_timeout) : retransmission_timeout(retrans_timeout) {}
+    } _retransmission_timer;
+
   public:
     //! Initialize a TCPSender
     TCPSender(const size_t capacity = TCPConfig::DEFAULT_CAPACITY,
@@ -69,7 +86,7 @@ class TCPSender {
     size_t bytes_in_flight() const;
 
     //! \brief Number of consecutive retransmissions that have occurred in a row
-    unsigned int consecutive_retransmissions() const;
+    unsigned int consecutive_retransmissions() const; // 连续重传次数
 
     //! \brief TCPSegments that the TCPSender has enqueued for transmission.
     //! \note These must be dequeued and sent by the TCPConnection,
