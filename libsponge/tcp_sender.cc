@@ -49,7 +49,7 @@ void TCPSender::fill_window() {
         new_seg.payload() = Buffer(move(payload_string));
         // 是否要 fin = true
         // 从未发送过 fin  &&  _stream终止输入并且读完  &&  window内还可以装入一位fin
-        if (!_fin_flag && _stream.eof() && _retrans_buffer_space + payload_string.size() < win_size && new_seg.length_in_sequence_space() < TCPConfig::MAX_PAYLOAD_SIZE) // 
+        if (!_fin_flag && _stream.eof() && _retrans_buffer_space + payload_string.size() < win_size && new_seg.length_in_sequence_space() < TCPConfig::MAX_PAYLOAD_SIZE)
             _fin_flag = new_seg.header().fin = true;
         // 没有数据要发送就break 如果payload字段没有数据而 fin == true 也可以发送
         if (new_seg.length_in_sequence_space() == 0)
@@ -110,11 +110,11 @@ void TCPSender::tick(const size_t ms_since_last_tick) {
     _retransmission_timer.passage += ms_since_last_tick;
     // 如超时且还有未确认的seg 则重传
     if (_retransmission_timer.passage > _retransmission_timer.retransmission_timeout && !_retransmission_buffer.empty()) {
-        _segments_out.push(_retransmission_buffer.front());     // 重新推入发送队列
-        ++ _retransmission_timer.consecutive_retransmissions;   // 连续超时重传计数
         // 如果window_size > 0 那么说明超时是由网络拥堵造成的
         if (_window_size > 0)
             _retransmission_timer.retransmission_timeout *= 2;  // RTO * 2
+        _segments_out.push(_retransmission_buffer.front());     // 重新推入发送队列
+        ++ _retransmission_timer.consecutive_retransmissions;   // 连续超时重传计数
         _retransmission_timer.passage = 0;  // 重置定时器
     }
 }
