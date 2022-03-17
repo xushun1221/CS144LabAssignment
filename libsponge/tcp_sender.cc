@@ -121,14 +121,15 @@ void TCPSender::tick(const size_t ms_since_last_tick) {
         // _window_size > 0 说明接收方还在接收
         // 如果超时则是网络拥堵导致
         // 启动二进制指数退避
-        if (_window_size > 0)
+        if (_window_size > 0) {
             _retrans_timer.timeout *= 2;
+            // 超时则将超时重发计数加一
+            ++_retrans_timer.consecutive_retransmissions_count;
+        }
         // 重新计时
         _retrans_timer.timecount = 0;
         // 重发
         _segments_out.push(_outstanding_queue.front());
-        // 超时则将超时重发计数加一
-        ++_retrans_timer.consecutive_retransmissions_count;
     }
 }
 
