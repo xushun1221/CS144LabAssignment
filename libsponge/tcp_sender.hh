@@ -32,22 +32,25 @@ class TCPSender {
     //! the (absolute) sequence number for the next byte to be sent
     uint64_t _next_seqno{0};
 
-    // syn fin 标记
-    bool _syn_flag{false};
-    bool _fin_flag{false};
-    // 重传缓存队列
-    std::queue<TCPSegment> _outstanding_queue{};
-    // 重传队列总占用
-    size_t _outstanding_bytes{0};
-    // 接收方窗口大小
-    size_t _window_size{1};
+
     // 定时器
     struct retrans_timer {
-      size_t passage{0};        // 距离上次tick的时间
-      size_t retrans_timeout;          // 当前RTO
-      size_t consecutive_retrans_count{0};  // 连续重传次数
-      retrans_timer(size_t rto) : retrans_timeout(rto) {} // 构造
+      size_t timecount{0}; // 计时
+      size_t timeout;      // 当前的RTO
+      size_t consecutive_retransmissions_count{0}; // 连续超时重传次数
+      retrans_timer(size_t retx_timeout) : timeout(retx_timeout) {}
     } _retrans_timer;
+
+    // 已发送未确认的TCP段
+    std::queue<TCPSegment> _outstanding_queue{};
+    size_t _outstanding_bytes{0};
+
+    // 接收方窗口大小
+    size_t _window_size{1};
+    // syn fin 是否发送
+    bool _syn_flag{false};
+    bool _fin_flag{false};
+
 
   public:
     //! Initialize a TCPSender

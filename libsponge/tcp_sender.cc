@@ -26,116 +26,116 @@ TCPSender::TCPSender(const size_t capacity, const uint16_t retx_timeout, const s
 uint64_t TCPSender::bytes_in_flight() const { return _outstanding_bytes; }
 
 void TCPSender::fill_window() {
-    // 尽管接收方的窗口大小为0 还是要发送报文段来获得最新窗口大小
-    // 我们需要用另一个变量来表示window_size
-    // 因为如果我们令window_size == 1 会导致二进制指数退避
+    // 尽管接收方的窗口大小为0 还是要发送报文段以期得到接收方返回的最新窗口大小
+    // 我们需要用另一个变量来表示_window_size
+    // 因为如果我们将_window_size 视作 1 实际上是超出接收方的接受范围
+    // 直接令其为1 在调用tick()时 无法判断超时的原因是网络问题还是接收方窗口为0
+    // 会导致错误的二进制指数退避
     size_t win_size = _window_size == 0 ? 1 : _window_size;
-    // 已发送未确认的字节数小于窗口大小才可以继续发送
-    while (_outstanding_bytes < win_size) {
-        // 构造新的seg
-        TCPSegment new_seg;
-        // 如果是第一次发送 发送一个带有syn的空包
+    // 循环填充窗口 窗口大小大于以发送的字节数
+    while (win_size > _outstanding_bytes) {
+        // 构造新报文段
+        TCPSegment segment;
+        // 如果没有握手 立即发送syn信号
         if (!_syn_flag) {
+            segment.header().syn = true;
             _syn_flag = true;
-            new_seg.header().syn = true;
-            new_seg.header().seqno = next_seqno();
-            _segments_out.push(new_seg);
-            ++ _next_seqno;
-            ++ _outstanding_bytes;
-            _outstanding_queue.push(new_seg);
-            _retrans_timer.passage = 0;
-            _retrans_timer.consecutive_retrans_count = 0;
-            _retrans_timer.retrans_timeout = _initial_retransmission_timeout;
-            return;
         }
         // 装入序列号
-        new_seg.header().seqno = next_seqno();
-        // 待装入的负载长度 尽可能长
-        size_t payload_size = min(TCPConfig::MAX_PAYLOAD_SIZE, win_size - _outstanding_bytes);
-        // 获得待装入负载
-        string payload_string = _stream.read(payload_size);
+        segment.header().seqno = next_seqno();
+        // 装入负载  注意syn会占用一个payload_size
+        size_t payload_size = min(TCPConfig::MAX_PAYLOAD_SIZE, win_size - _outstanding_bytes) - segment.header().syn;
+        // 从字节流中读取字节
+        string payload = _stream.read(payload_size);
+        // 判断是否装入fin 装入fin的条件为
+        // 1.没发送过fin信号 2.字节流已经读取完毕并关闭
+        // 3.接收方能接收的字节数 > 装入负载数 + syn(算一个)
+        // 这样才能将fin装入seg
+        // 若接收方当前能够接收的字节数 == 装入负载数 + syn
+        // 那么fin信号应装在下一个空负载的seg中
+        if (!_fin_flag && _stream.eof() && payload.size() + segment.header().syn < win_size - _outstanding_bytes)
+            _fin_flag = segment.header().fin = true;
         // 装入负载
-        new_seg.payload() = Buffer(move(payload_string));
-        // 是否要 fin = true
-        // 从未发送过 fin  &&  _stream终止输入并且读完  &&  window内还可以装入一位fin
-        if (!_fin_flag && _stream.eof() && _outstanding_bytes + payload_string.size() < win_size && new_seg.length_in_sequence_space() < TCPConfig::MAX_PAYLOAD_SIZE)
-            _fin_flag = new_seg.header().fin = true;
-        // 没有数据要发送就break 如果payload字段没有数据而 fin == true 也可以发送
-        if (new_seg.length_in_sequence_space() == 0)
+        segment.payload() = Buffer(move(payload));
+        // 发送数据包的条件是 该数据包有占用seqno (包括 syn fin)
+        if (segment.length_in_sequence_space() == 0)
             break;
-        // 如果缓存区没有等待确认的seg 那么我们需要为这个新seg开启定时器
+        // 如果缓存区没有等待确认的seg 我们应为这个新的seg开启定时器
         if (_outstanding_queue.empty()) {
-            _retrans_timer.passage = 0;
-            _retrans_timer.retrans_timeout = _initial_retransmission_timeout;
-            _retrans_timer.consecutive_retrans_count = 0;
+            _retrans_timer.timeout = _initial_retransmission_timeout;
+            _retrans_timer.timecount = 0;
         }
-        // 发送新seg
-        _segments_out.push(new_seg);
-        // 缓存新seg
-        _outstanding_queue.push(new_seg);
-        _outstanding_bytes += new_seg.length_in_sequence_space();
-        // 更新新的 abs_seqno
-        _next_seqno += new_seg.length_in_sequence_space();
-        // 如果已经fin 就退出循环
-        if (new_seg.header().fin)
+        // 发送
+        _segments_out.push(segment);
+        // 缓存新的seg
+        _outstanding_bytes += segment.length_in_sequence_space();
+        _outstanding_queue.push(segment);
+        // 更新 _next_seqno
+        _next_seqno += segment.length_in_sequence_space();
+        // 如果发送完毕立即退出fill
+        if (segment.header().fin)
             break;
     }
 }
 
 //! \param ackno The remote receiver's ackno (acknowledgment number)
 //! \param window_size The remote receiver's advertised window size
-void TCPSender::ack_received(const WrappingInt32 ackno, const uint16_t window_size) { 
-    // DUMMY_CODE(ackno, window_size); 
-    // 获得ackno的abs_seqno checkpoint取_next_seqno
-    uint64_t abs_ack_seqno = unwrap(ackno, _isn, _next_seqno);
-    // 如果确认号比尚未发送的seqno还大 则丢弃
-    // abs_ack_seqno指向的字节之前的字节都收到了
-    if (abs_ack_seqno > next_seqno_absolute())
+void TCPSender::ack_received(const WrappingInt32 ackno, const uint16_t window_size) {
+    // 获得绝对ack的seqno
+    size_t abs_seqno = unwrap(ackno, _isn, _next_seqno);
+    // abs_seqno表示该字节之前的所有字节已收到
+    // 确认号不能大于待发送字节
+    if (abs_seqno > _next_seqno)
         return;
-    // 把已经收到确认的seg推出缓存
+    // 把已经收到确认的seg弹出缓存区
     while (!_outstanding_queue.empty()) {
-        TCPSegment front_seg = _outstanding_queue.front();
-        // 队头的seg被完全确认
-        if (unwrap(front_seg.header().seqno, _isn, abs_ack_seqno) + front_seg.length_in_sequence_space() <= abs_ack_seqno) {
-            _outstanding_bytes -= front_seg.length_in_sequence_space(); // 更新已发送未确认字节数
+        const TCPSegment &seg = _outstanding_queue.front();
+        // 如果队头seg（最先发送的）完全确认
+        if (unwrap(seg.header().seqno, _isn, abs_seqno) + seg.length_in_sequence_space() <= abs_seqno) {
+            // 弹出队列
+            _outstanding_bytes -= seg.length_in_sequence_space();
             _outstanding_queue.pop();
-            // 如果有新的被确认seg timeout回归为初始值 重启定时器
-            _retrans_timer.retrans_timeout = _initial_retransmission_timeout;
-            _retrans_timer.passage = 0;
-            _retrans_timer.consecutive_retrans_count = 0;
+            // 如果有新的数据包被成功接收 RTO回归初始值 定时器重新计时
+            _retrans_timer.timeout = _initial_retransmission_timeout;
+            _retrans_timer.timecount = 0;
         }
+        // 如果seg没有被完全确认 说明后面的seg也一样
         else
             break;
     }
-    // 收到ack说明网络没有中断 超时重传计数归零
-    _retrans_timer.consecutive_retrans_count = 0;
+    // 只要收到了ack 则说明网络并没有中断
+    // 那么连续重传计数也应该归零
+    _retrans_timer.consecutive_retransmissions_count = 0;
     // 更新窗口大小
     _window_size = window_size;
-    // 填充窗口
+    // 填充发送窗口
     fill_window();
 }
 
 //! \param[in] ms_since_last_tick the number of milliseconds since the last call to this method
-void TCPSender::tick(const size_t ms_since_last_tick) { 
-    // DUMMY_CODE(ms_since_last_tick); 
+void TCPSender::tick(const size_t ms_since_last_tick) {
     // 统计经过的时间
-    _retrans_timer.passage += ms_since_last_tick;
-    // 如超时且还有未确认的seg 则重传
-    if (_retrans_timer.passage > _retrans_timer.retrans_timeout && !_outstanding_queue.empty()) {
-        // 如果window_size > 0 那么说明超时是由网络拥堵造成的
+    _retrans_timer.timecount += ms_since_last_tick;
+    // 如果存在未确认的seg 且 超时 则重传最先发送的seg
+    if (_retrans_timer.timecount >= _retrans_timer.timeout && !_outstanding_queue.empty()) {
+        // _window_size > 0 说明接收方还在接收
+        // 如果超时则是网络拥堵导致
+        // 启动二进制指数退避
         if (_window_size > 0)
-            _retrans_timer.retrans_timeout *= 2;  // RTO * 2
-        _segments_out.push(_outstanding_queue.front());     // 重新推入发送队列
-        ++ _retrans_timer.consecutive_retrans_count;   // 连续超时重传计数
-        _retrans_timer.passage = 0;  // 重置定时器
+            _retrans_timer.timeout *= 2;
+        // 重新计时
+        _retrans_timer.timecount = 0;
+        // 重发
+        _segments_out.push(_outstanding_queue.front());
+        // 超时则将超时重发计数加一
+        ++_retrans_timer.consecutive_retransmissions_count;
     }
 }
 
-unsigned int TCPSender::consecutive_retransmissions() const { return _retrans_timer.consecutive_retrans_count; }
+unsigned int TCPSender::consecutive_retransmissions() const { return _retrans_timer.consecutive_retransmissions_count; }
 
-// 发送一个空的确认seg
 void TCPSender::send_empty_segment() {
-    TCPSegment seg;
-    seg.header().seqno = next_seqno();
-    _segments_out.push(seg);
+    TCPSegment segment;
+    segment.header().seqno = next_seqno();
+    _segments_out.push(segment);
 }
