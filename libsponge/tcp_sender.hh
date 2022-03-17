@@ -36,18 +36,18 @@ class TCPSender {
     bool _syn_flag{false};
     bool _fin_flag{false};
     // 重传缓存队列
-    std::queue<TCPSegment> _retransmission_buffer{};
+    std::queue<TCPSegment> _outstanding_queue{};
     // 重传队列总占用
-    size_t _retrans_buffer_space{0};
+    size_t _outstanding_bytes{0};
     // 接收方窗口大小
     size_t _window_size{1};
     // 定时器
-    struct retransmission_timer {
-      size_t passage{0};   // 距离上次tick的时间
-      size_t retransmission_timeout;          // 当前RTO
-      size_t consecutive_retransmissions{0};  // 连续重传次数
-      retransmission_timer(size_t retrans_timeout) : retransmission_timeout(retrans_timeout) {}
-    } _retransmission_timer;
+    struct retrans_timer {
+      size_t passage{0};        // 距离上次tick的时间
+      size_t retrans_timeout;          // 当前RTO
+      size_t consecutive_retrans_count{0};  // 连续重传次数
+      retrans_timer(size_t rto) : retrans_timeout(rto) {} // 构造
+    } _retrans_timer;
 
   public:
     //! Initialize a TCPSender
