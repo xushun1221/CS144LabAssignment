@@ -23,12 +23,21 @@ size_t TCPConnection::time_since_last_segment_received() const { return _time_si
 void TCPConnection::segment_received(const TCPSegment &seg) { 
     if (!active())
         return;
-    // 收到rst消息 需要立即关闭连接
-    if (seg.header().rst == true) {
+    // 收到seg更新定时器
+    _time_since_last_segment_received = 0;
+    // 收到rst消息 需要立即关闭连接 LISTEN 期间收到的rst应该被忽略
+    if (seg.header().rst) {
+        // LISTEN == 未收到syn && 未发送syn
+        if (!_receiver.ackno().has_value() && _sender.next_seqno_absolute() == 0)
+            return;
+        _sender.stream_in().set_error();
+        _receiver.stream_out().set_error();
+        _active_flag =false;
+        //_sender.send_empty_segment();
         //unclean_shutdown();
         return;
     }
-    // LISTEN 没有收到syn之前 收到的seg不处理
+    // 没有收到syn之前 收到的seg不处理 SYN-SENT && LISTEN
     if (!seg.header().syn&& !_receiver.ackno().has_value())
         return;
     // 如果seg里有ack信息 则将确认信息告知sender
@@ -62,14 +71,14 @@ size_t TCPConnection::write(const string &data) {
 void TCPConnection::tick(const size_t ms_since_last_tick) { 
     if (!active())
         return;
-    _time_since_last_segment_received = 0;
+    _time_since_last_segment_received += ms_since_last_tick;
     _sender.tick(ms_since_last_tick);
-    if (_sender.consecutive_retransmissions() > _cfg.MAX_RETX_ATTEMPTS)
+    if (_sender.consecutive_retransmissions() > _cfg.MAX_RETX_ATTEMPTS) {
+        _sender.send_empty_segment();
         unclean_shutdown();
-    else {
-        send_segments();
-        try_clean_shutdown();
     }
+    else
+        send_segments();
 }
 
 void TCPConnection::end_input_stream() {
@@ -89,6 +98,7 @@ TCPConnection::~TCPConnection() {
         if (active()) {
             cerr << "Warning: Unclean shutdown of TCPConnection\n";
             // Your code here: need to send a RST segment to the peer
+            _sender.send_empty_segment();
             unclean_shutdown();
         }
     } catch (const exception &e) {
@@ -108,6 +118,7 @@ void TCPConnection::send_segments() {
         }
         _segments_out.push(seg);
     }
+    try_clean_shutdown();
 }
 
 void TCPConnection::try_clean_shutdown() {
@@ -122,31 +133,19 @@ void TCPConnection::try_clean_shutdown() {
 }
 
 void TCPConnection::unclean_shutdown() {
+    // unclean_shutdown 需要发送队列中有seg将rst捎带
     // 关闭输入输出流
     _sender.stream_in().set_error();
     _receiver.stream_out().set_error();
     // 关闭active状态
     _active_flag = false;
     // 构建 rst 消息
-    TCPSegment seg;
-    // 立即发送rst信号
-    // 如果当前发送队列里面还有seg 那就把rst捎带发送
-    if (!_sender.segments_out().empty()) {
-        seg = _sender.segments_out().front();
-        _sender.segments_out().pop();
-        seg.header().rst = true;
-        // 不能忘了捎带ackno
-        if (_receiver.ackno().has_value()) {
-            seg.header().ack = true;
-            seg.header().ackno = _receiver.ackno().value();
-            seg.header().win = _receiver.window_size();
-        }
-    }
-    // 如果没有数据可以发送 发送空seg
-    if (_sender.segments_out().empty()) {
-        seg.header().rst = true;
-        seg.header().seqno = _sender.next_seqno();
-    }
-    // 发送 rst
+    TCPSegment seg = _sender.segments_out().front();
+    _sender.segments_out().pop();
+    seg.header().rst = true;
+    seg.header().ack = true;
+    if (_receiver.ackno().has_value())
+        seg.header().ackno = _receiver.ackno().value();
+    seg.header().win = _receiver.window_size();
     _segments_out.push(seg);
 }
